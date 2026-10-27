@@ -49,7 +49,7 @@ Purpose: determine the lowest-risk way to show Outlook + Google events in an And
 30. Etar upstream issues: https://github.com/Etar-Group/Etar-Calendar/issues
 31. Etar upstream pull requests: https://github.com/Etar-Group/Etar-Calendar/pulls
 32. Etar feature request for month/week widgets #2042: https://github.com/Etar-Group/Etar-Calendar/pull/2042
-33. Microsoft Graph calendar events API (if future authenticated integration is ever considered): https://learn.microsoft.com/en-us/graph/api/resources/event?view=graph-rest- v1.0
+33. Microsoft Graph calendar events API (if future authenticated integration is ever considered): https://learn.microsoft.com/en-us/graph/api/resources/event?view=graph-rest-1.0
 34. Microsoft Graph calendar delta query (incremental sync concept): https://learn.microsoft.com/en-us/graph/delta-query-events
 35. ICS recurrence rule reference: https://www.icalendar.org/iCalendar-RFC-5545/3-8-5-3-recurrence-rule.html
 
@@ -190,3 +190,48 @@ This document and the CI JDK correction are committed to the `ics-subscriptions`
 ## 8. Source notes
 
 Official Microsoft docs describe Outlook's widget configuration and native calendar sync, including the fact that sync may be off by default and can be controlled by Intune policy. Android docs describe widget update limits and recommend WorkManager for longer asynchronous work. RFC 5545 defines recurrence, timezone, all-day and event-property semantics. Etar's README explicitly says it reads synchronized calendars from Android Calendar Provider and documents known issues in its ICS import feature.
+## 9. Expanded reference set and reverse-engineering notes
+
+Additional primary references checked during the second pass:
+- Microsoft: Outlook Android calendar widget setup: https://support.microsoft.com/en-us/outlook/how-do-i-add-the-outlook-for-android-calendar-widget-to-my-home-screen
+- Microsoft: Outlook Android widget resizing: https://support.microsoft.com/en-us/outlook/how-do-i-resize-the-outlook-for-android-calendar-widget-on-my-home-screen
+- Microsoft: Outlook mobile optimization and widget setup: https://support.microsoft.com/en-us/outlook/optimize-the-outlook-mobile-app-for-your-ios-or-android-phone
+- Microsoft: Outlook mobile troubleshooting: https://support.microsoft.com/en-us/outlook/install-mobile/troubleshoot-outlook-mobile-issues
+- Microsoft: calendar/contact sync troubleshooting: https://support.microsoft.com/en-us/outlook/can-t-sync-calendar-and-contacts-with-my-phone-or-tablet
+- Microsoft Learn: Outlook native calendar sync and Intune policy controls: https://learn.microsoft.com/en-us/exchange/clients-and-mobile-in-exchange-online/outlook-for-ios-and-android/outlook-for-ios-and-android-configuration-with-microsoft-intune
+- Microsoft Learn: Allow Calendar Sync policy: https://learn.microsoft.com/microsoft-365/solutions/apps-config-step-2?view=o365-worldwide
+- Android Developers: Calendar Provider overview: https://developer.android.com/identity/providers/calendar-provider
+- Android Developers: persistent background work: https://developer.android.com/develop/background-work/background-tasks/persistent
+- Android Developers: define periodic work and constraints: https://developer.android.com/develop/background-work/background-tasks/persistent/getting-started/define-work
+- Android Developers: managing unique work: https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/manage-work
+- Android Developers: advanced widget update behavior: https://developer.android.com/develop/ui/views/appwidgets/advanced
+- RFC Editor: RFC 5545: https://www.rfc-editor.org/rfc/rfc5545.html
+- Etar upstream issue tracker: https://github.com/Etar-Group/Etar-Calendar/issues
+- Etar upstream pull request tracker: https://github.com/Etar-Group/Etar-Calendar/pulls
+
+### Reverse-engineering conclusions
+
+1. **Widget rendering and event synchronization are separate subsystems.** A widget can be stale even when Outlook itself is current, and Outlook can be stale even if the widget correctly renders the provider. Diagnostics must inspect each boundary separately.
+2. **The native-sync switch is an architectural boundary.** Microsoft's documentation explicitly says Sync Calendars exports Outlook events to Android's native Calendar app and requires user participation/permissions. Enterprise policy can block availability. This makes provider inspection the decisive experiment.
+3. **A six-hour WorkManager request is not a six-hour freshness guarantee.** Android documents periodic work as deferrable, with exact execution depending on constraints and system optimization. UI should say 'last checked' and expose manual refresh rather than promise real-time synchronization.
+4. **ICS import is a data reconciliation problem, not just a download problem.** Parsing must be complete and validated before writes/deletes. Download success, HTTP 200, or presence of VCALENDAR markers is insufficient to authorize destructive reconciliation.
+5. **Calendar Provider is a shared system database.** Calendar and event mutations require the correct permissions; event ownership, calendar IDs, account type, time zone and sync-adapter semantics need explicit handling.
+6. **Do not implement Microsoft Graph merely to solve widget display.** Graph could offer richer authenticated access, but requires a registered app, OAuth, consent, token refresh, privacy and tenant policy handling. Native sync is the lowest-risk supported path if it meets the need.
+7. **No reliable reverse engineering of Outlook's private internals is needed or appropriate.** The supported contract is public UI, documented sync settings, Android Calendar Provider, official widget behavior and standards-compliant ICS. Avoid scraping Outlook's private databases, intercepting credentials, or relying on undocumented endpoints.
+
+### Reproducible diagnostic trace to collect on the phone
+
+Before changing more code, record this sequence with timestamps:
+1. Create or identify a test event in Outlook with a unique title, e.g. `SYNC-PROBE-2026-10-27-01`.
+2. Verify it appears in Outlook mobile and Outlook on the web.
+3. Enable Outlook > Settings > account > Calendar > Sync Calendars (if available) and grant requested permission.
+4. Verify the probe appears in the phone's native Calendar app and identify which calendar/account owns it.
+5. Verify Etar displays the probe when that calendar is enabled.
+6. Add Etar Agenda widget and verify the probe appears.
+7. Edit the probe title/time in Outlook and record the time each layer updates.
+8. Repeat with a Google event and a work-profile account if applicable.
+9. If the probe fails at step 3, investigate account type/policy; if at step 4, investigate provider sync/permissions; if at step 5, investigate Etar filters/provider query; if at step 6, investigate widget update/rendering.
+
+### Known limitation of this audit
+
+This is a source-and-documentation audit, not a completed device reverse-engineering session. No device logs, Microsoft account policy, Android provider database, or successful CI run were available in this session. Findings are hypotheses grounded in official docs and source inspection until the probe sequence and CI are completed.
