@@ -27,6 +27,7 @@ import android.widget.EditText
 import androidx.appcompat.app.AlertDialog
 import com.android.calendar.icalendar.IcsSubscriptionStore
 import com.android.calendar.icalendar.IcsSubscriptionUrl
+import com.android.calendar.icalendar.IcsSubscriptionWorker
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
@@ -217,7 +218,11 @@ class MainListPreferences : PreferenceFragmentCompat() {
                     url == null -> Toast.makeText(context, "Introduce una URL HTTPS válida", Toast.LENGTH_LONG).show()
                     !IcsSubscriptionStore.add(context, url) ->
                         Toast.makeText(context, "La URL ya está guardada", Toast.LENGTH_LONG).show()
-                    else -> Toast.makeText(context, "URL guardada. La descarga automática aún no está conectada.", Toast.LENGTH_LONG).show()
+                    else -> {
+                        IcsSubscriptionWorker.schedule(context)
+                        IcsSubscriptionWorker.refreshNow(context)
+                        Toast.makeText(context, "URL guardada. Descarga programada.", Toast.LENGTH_LONG).show()
+                    }
                 }
             }
             .setNeutralButton("Gestionar") { _, _ -> showSavedIcsSubscriptions() }
