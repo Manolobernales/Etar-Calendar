@@ -45,8 +45,19 @@ class IcsSubscriptionWorker(
                     connection.connect()
                     if (connection.responseCode !in 200..299) throw IllegalStateException("HTTP ${connection.responseCode}")
                     val stream = connection.inputStream
-                    val bytes = stream.use { it.readNBytes(MAX_FEED_BYTES + 1) }
-                    if (bytes.size > MAX_FEED_BYTES) throw IllegalStateException("ICS feed too large")
+                    val bytes = stream.use { input ->
+                        val output = java.io.ByteArrayOutputStream()
+                        val buffer = ByteArray(8192)
+                        var total = 0
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            if (total > MAX_FEED_BYTES) throw IllegalStateException("ICS feed too large")
+                            output.write(buffer, 0, count)
+                        }
+                        output.toByteArray()
+                    }
                     bytes.toString(Charsets.UTF_8)
                 } finally {
                     connection.disconnect()
