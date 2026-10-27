@@ -47,6 +47,7 @@ object IcsSubscriptionImporter {
         }
 
         var imported = 0
+        val seenUris = mutableSetOf<String>()
         for (event in events) {
             val uid = event["UID"]?.first?.takeIf { it.isNotBlank() } ?: continue
             val startValue = event["DTSTART"] ?: continue
@@ -58,6 +59,7 @@ object IcsSubscriptionImporter {
             if (end < start) continue
 
             val stableUri = "etar-ics://$digest/${sha256(uid)}"
+            seenUris.add(stableUri)
             val values = ContentValues().apply {
                 put(CalendarContract.Events.CALENDAR_ID, calendarId)
                 put(CalendarContract.Events.TITLE, unescape(event["SUMMARY"]?.first).ifBlank { "(Sin título)" })
@@ -92,6 +94,34 @@ object IcsSubscriptionImporter {
                 )
                 imported++
             }
+        }
+
+        // Reconcile deletions only after a complete, syntactically valid VCALENDAR
+        // was received by the worker. Events absent from the latest feed are stale.
+        val staleIds = mutableListOf<Long>()
+        resolver.query(
+            CalendarContract.Events.CONTENT_URI,
+            arrayOf(CalendarContract.Events._ID, CalendarContract.Events.CUSTOM_APP_URI),
+            "${CalendarContract.Events.CALENDAR_ID}=?",
+            arrayOf(calendarId.toString()),
+            null
+        )?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(CalendarContract.Events._ID)
+            val uriColumn = cursor.getColumnIndexOrThrow(CalendarContract.Events.CUSTOM_APP_URI)
+            while (cursor.moveToNext()) {
+                val storedUri = cursor.getString(uriColumn)
+                if (storedUri != null && storedUri.startsWith("etar-ics://$digest/") &&
+                    storedUri !in seenUris) {
+                    staleIds.add(cursor.getLong(idColumn))
+                }
+            }
+        }
+        for (id in staleIds) {
+            resolver.delete(
+                CalendarContract.Events.CONTENT_URI,
+                "${CalendarContract.Events._ID}=? AND ${CalendarContract.Events.CALENDAR_ID}=?",
+                arrayOf(id.toString(), calendarId.toString())
+            )
         }
         return imported
     }
