@@ -20,6 +20,7 @@ import android.app.Application;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
 
+import com.android.calendar.icalendar.IcsSubscriptionWorker;
 import com.android.calendar.settings.GeneralPreferences;
 import com.android.calendar.settings.ViewDetailsPreferences;
 
@@ -54,6 +55,9 @@ public class CalendarApplication extends Application {
 
         // Initialize the registry mapping some custom behavior.
         ExtensionsFactory.init(getAssets());
+
+        // Restore periodic ICS refresh scheduling for subscriptions saved by the user.
+        IcsSubscriptionWorker.Companion.schedule(this);
     }
 
     @Override
