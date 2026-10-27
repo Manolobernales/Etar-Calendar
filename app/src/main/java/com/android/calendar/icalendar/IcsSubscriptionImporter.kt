@@ -96,6 +96,33 @@ object IcsSubscriptionImporter {
         return imported
     }
 
+    /** Removes the local calendar owned by a feed when the subscription is deleted. */
+    fun removeFeed(context: Context, feedUrl: String) {
+        val accountName = "etar_ics_${sha256(feedUrl).take(24)}"
+        val resolver = context.contentResolver
+        val calendarIds = mutableListOf<Long>()
+        resolver.query(
+            CalendarContract.Calendars.CONTENT_URI,
+            arrayOf(CalendarContract.Calendars._ID),
+            "${CalendarContract.Calendars.ACCOUNT_NAME}=? AND ${CalendarContract.Calendars.ACCOUNT_TYPE}=?",
+            arrayOf(accountName, CalendarContract.ACCOUNT_TYPE_LOCAL),
+            null
+        )?.use { cursor ->
+            while (cursor.moveToNext()) calendarIds.add(cursor.getLong(0))
+        }
+        for (id in calendarIds) {
+            val uri = CalendarContract.Calendars.CONTENT_URI.buildUpon()
+                .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+                .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, accountName)
+                .appendQueryParameter(
+                    CalendarContract.Calendars.ACCOUNT_TYPE,
+                    CalendarContract.ACCOUNT_TYPE_LOCAL
+                )
+                .build()
+            resolver.delete(uri, "${CalendarContract.Calendars._ID}=?", arrayOf(id.toString()))
+        }
+    }
+
     private fun findOrCreateCalendar(context: Context, accountName: String, displayName: String): Long? {
         val resolver = context.contentResolver
         resolver.query(
