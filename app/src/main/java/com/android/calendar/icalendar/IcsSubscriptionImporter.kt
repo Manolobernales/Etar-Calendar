@@ -120,7 +120,15 @@ object IcsSubscriptionImporter {
             put(CalendarContract.Calendars.ALLOWED_REMINDERS, CalendarContract.Reminders.METHOD_ALERT.toString())
             put(CalendarContract.Calendars.ALLOWED_ATTENDEE_TYPES, CalendarContract.Attendees.TYPE_NONE.toString())
         }
-        return resolver.insert(CalendarContract.Calendars.CONTENT_URI, values)?.lastPathSegment?.toLongOrNull()
+        val syncAdapterUri = CalendarContract.Calendars.CONTENT_URI.buildUpon()
+            .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+            .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, accountName)
+            .appendQueryParameter(
+                CalendarContract.Calendars.ACCOUNT_TYPE,
+                CalendarContract.ACCOUNT_TYPE_LOCAL
+            )
+            .build()
+        return resolver.insert(syncAdapterUri, values)?.lastPathSegment?.toLongOrNull()
     }
 
     private fun parseDate(value: String, params: String): Long? {
