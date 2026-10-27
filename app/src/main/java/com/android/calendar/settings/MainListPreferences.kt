@@ -23,6 +23,10 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import android.widget.Toast
+import android.widget.EditText
+import androidx.appcompat.app.AlertDialog
+import com.android.calendar.icalendar.IcsSubscriptionStore
+import com.android.calendar.icalendar.IcsSubscriptionUrl
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
@@ -172,6 +176,15 @@ class MainListPreferences : PreferenceFragmentCompat() {
             launchAddEtesync()
             true
         }
+        val addIcsSubscriptionPreference = Preference(requireContext()).apply {
+            title = "Suscripciones de calendario por URL (ICS)"
+            summary = "Guardar direcciones HTTPS de calendarios remotos"
+            icon = ContextCompat.getDrawable(requireContext(), R.drawable.ic_add)
+        }
+        addIcsSubscriptionPreference.setOnPreferenceClickListener {
+            showIcsSubscriptionsDialog()
+            true
+        }
         val addOfflinePreference = Preference(requireContext()).apply {
             title = getString(R.string.preferences_list_add_offline)
             icon = ContextCompat.getDrawable(requireContext(), R.drawable.ic_add)
@@ -183,7 +196,57 @@ class MainListPreferences : PreferenceFragmentCompat() {
         screen.addPreference(generalPreference)
         screen.addPreference(addCaldavPreference)
         screen.addPreference(addEtesyncPreference)
+        screen.addPreference(addIcsSubscriptionPreference)
         screen.addPreference(addOfflinePreference)
+    }
+
+
+    private fun showIcsSubscriptionsDialog() {
+        val context = requireContext()
+        val input = EditText(context).apply {
+            hint = "https://ejemplo.com/calendario.ics"
+            singleLine = true
+        }
+        AlertDialog.Builder(context)
+            .setTitle("Suscripciones ICS")
+            .setMessage("Guarda una URL HTTPS de un calendario remoto.")
+            .setView(input)
+            .setPositiveButton("Añadir") { _, _ ->
+                val url = IcsSubscriptionUrl.normalizeAndValidate(input.text.toString())
+                when {
+                    url == null -> Toast.makeText(context, "Introduce una URL HTTPS válida", Toast.LENGTH_LONG).show()
+                    !IcsSubscriptionStore.add(context, url) ->
+                        Toast.makeText(context, "La URL ya está guardada", Toast.LENGTH_LONG).show()
+                    else -> Toast.makeText(context, "URL guardada. La descarga automática aún no está conectada.", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNeutralButton("Gestionar") { _, _ -> showSavedIcsSubscriptions() }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun showSavedIcsSubscriptions() {
+        val context = requireContext()
+        val urls = IcsSubscriptionStore.getAll(context)
+        if (urls.isEmpty()) {
+            Toast.makeText(context, "No hay suscripciones guardadas", Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(context)
+            .setTitle("Toca una URL para eliminarla")
+            .setItems(urls.toTypedArray()) { _, which ->
+                val selected = urls[which]
+                AlertDialog.Builder(context)
+                    .setMessage("¿Eliminar esta suscripción?\n$selected")
+                    .setPositiveButton("Eliminar") { _, _ ->
+                        IcsSubscriptionStore.remove(context, selected)
+                        Toast.makeText(context, "Suscripción eliminada", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Cancelar", null)
+                    .show()
+            }
+            .setNegativeButton("Cerrar", null)
+            .show()
     }
 
     private fun addOfflineCalendar() {
