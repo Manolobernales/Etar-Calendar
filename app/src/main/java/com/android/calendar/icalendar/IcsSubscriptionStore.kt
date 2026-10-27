@@ -33,7 +33,10 @@ object IcsSubscriptionStore {
 
     fun remove(context: Context, url: String): Boolean {
         val removed = save(context, getAll(context).filterNot { it == url })
-        if (removed) snapshotFile(context, url).delete()
+        if (removed) {
+            snapshotFile(context, url).delete()
+            runCatching { IcsSubscriptionImporter.removeFeed(context, url) }
+        }
         return removed
     }
 
