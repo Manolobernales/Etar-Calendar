@@ -55,6 +55,7 @@ class IcsSubscriptionWorker(
                     throw IllegalStateException("Response is not an iCalendar feed")
                 }
                 IcsSubscriptionStore.saveLastDownload(applicationContext, safeUrl, body)
+                IcsSubscriptionImporter.import(applicationContext, safeUrl, body)
             } catch (_: Exception) {
                 hadFailure = true
             }
