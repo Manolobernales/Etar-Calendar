@@ -66,7 +66,7 @@ object IcsSubscriptionImporter {
                 put(CalendarContract.Events.DTSTART, start)
                 put(CalendarContract.Events.DTEND, end)
                 put(CalendarContract.Events.ALL_DAY, if (allDay) 1 else 0)
-                put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
+                put(CalendarContract.Events.EVENT_TIMEZONE, timezoneId(startValue.first, startValue.second))
                 put(CalendarContract.Events.CUSTOM_APP_PACKAGE, context.packageName)
                 put(CalendarContract.Events.CUSTOM_APP_URI, stableUri)
                 put(CalendarContract.Events.RRULE, event["RRULE"]?.first)
@@ -138,12 +138,35 @@ object IcsSubscriptionImporter {
         for (pattern in patterns) try {
             val format = SimpleDateFormat(pattern, Locale.ROOT).apply {
                 isLenient = false
-                timeZone = if (value.endsWith("Z")) TimeZone.getTimeZone("UTC")
-                    else TimeZone.getDefault()
+                timeZone = when {
+                    value.endsWith("Z") -> TimeZone.getTimeZone("UTC")
+                    params.contains("TZID=", true) -> {
+                        val tzid = params.split(';')
+                            .firstOrNull { it.startsWith("TZID=", true) }
+                            ?.substringAfter('=')
+                            ?.trim('"')
+                        tzid?.let(TimeZone::getTimeZone) ?: TimeZone.getDefault()
+                    }
+                    else -> TimeZone.getDefault()
+                }
             }
             return format.parse(value)?.time
         } catch (_: Exception) { }
         return null
+    }
+
+    private fun timezoneId(value: String, params: String): String {
+        if (value.endsWith("Z")) return "UTC"
+        if (params.contains("TZID=", true)) {
+            val tzid = params.split(';')
+                .firstOrNull { it.startsWith("TZID=", true) }
+                ?.substringAfter('=')
+                ?.trim('"')
+            if (!tzid.isNullOrBlank() && TimeZone.getTimeZone(tzid).id != "GMT") {
+                return TimeZone.getTimeZone(tzid).id
+            }
+        }
+        return TimeZone.getDefault().id
     }
 
     private fun unfold(text: String): List<String> {
