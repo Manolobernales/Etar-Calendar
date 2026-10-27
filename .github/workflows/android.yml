@@ -11,11 +11,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-      - name: set up JDK 25
+      - name: Set up JDK 21 (project toolchain)
         uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
-          java-version: '25'
+          java-version: '21'
       - name: Restore Cache
         uses: actions/cache@v6
         with:

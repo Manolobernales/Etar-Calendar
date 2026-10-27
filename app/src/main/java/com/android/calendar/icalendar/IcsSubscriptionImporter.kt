@@ -1,0 +1,248 @@
+/*
+ * Copyright (C) 2026 The Etar Project contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+package com.android.calendar.icalendar
+
+import android.content.ContentValues
+import android.content.Context
+import android.provider.CalendarContract
+import java.net.URI
+import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
+
+/**
+ * Imports basic VEVENT fields into a dedicated local calendar for each feed.
+ * Existing events are matched by CUSTOM_APP_URI so repeated refreshes update rather
+ * than duplicate them. Unsupported or malformed events are skipped safely.
+ */
+object IcsSubscriptionImporter {
+    fun import(context: Context, feedUrl: String, text: String): Int {
+        val resolver = context.contentResolver
+        val digest = sha256(feedUrl).take(24)
+        val accountName = "etar_ics_$digest"
+        val calendarId = findOrCreateCalendar(context, accountName, "ICS: ${hostName(feedUrl)}")
+            ?: return 0
+
+        val lines = unfold(text)
+        val events = mutableListOf<Map<String, Pair<String, String>>>()
+        var current: MutableMap<String, Pair<String, String>>? = null
+        for (line in lines) {
+            if (line.equals("BEGIN:VEVENT", true)) {
+                current = linkedMapOf()
+            } else if (line.equals("END:VEVENT", true)) {
+                current?.let(events::add)
+                current = null
+            } else if (current != null) {
+                val colon = line.indexOf(':')
+                if (colon > 0) {
+                    val left = line.substring(0, colon)
+                    val name = left.substringBefore(';').uppercase(Locale.ROOT)
+                    val params = left.substringAfter(';', "")
+                    current[name] = line.substring(colon + 1) to params
+                }
+            }
+        }
+
+        var imported = 0
+        val seenUris = mutableSetOf<String>()
+        for (event in events) {
+            val uid = event["UID"]?.first?.takeIf { it.isNotBlank() } ?: continue
+            val startValue = event["DTSTART"] ?: continue
+            val start = parseDate(startValue.first, startValue.second) ?: continue
+            val endValue = event["DTEND"]
+            val allDay = startValue.second.contains("VALUE=DATE", true) ||
+                Regex("^\\d{8}$").matches(startValue.first)
+            val end = endValue?.let { parseDate(it.first, it.second) } ?: (start + if (allDay) 86_400_000L else 3_600_000L)
+            if (end < start) continue
+
+            val stableUri = "etar-ics://$digest/${sha256(uid)}"
+            seenUris.add(stableUri)
+            val values = ContentValues().apply {
+                put(CalendarContract.Events.CALENDAR_ID, calendarId)
+                put(CalendarContract.Events.TITLE, unescape(event["SUMMARY"]?.first).ifBlank { "(Sin título)" })
+                put(CalendarContract.Events.DESCRIPTION, unescape(event["DESCRIPTION"]?.first))
+                put(CalendarContract.Events.EVENT_LOCATION, unescape(event["LOCATION"]?.first))
+                put(CalendarContract.Events.DTSTART, start)
+                put(CalendarContract.Events.DTEND, end)
+                put(CalendarContract.Events.ALL_DAY, if (allDay) 1 else 0)
+                put(CalendarContract.Events.EVENT_TIMEZONE, timezoneId(startValue.first, startValue.second))
+                put(CalendarContract.Events.CUSTOM_APP_PACKAGE, context.packageName)
+                put(CalendarContract.Events.CUSTOM_APP_URI, stableUri)
+                put(CalendarContract.Events.RRULE, event["RRULE"]?.first)
+                put(CalendarContract.Events.AVAILABILITY, CalendarContract.Events.AVAILABILITY_BUSY)
+                put(CalendarContract.Events.STATUS, CalendarContract.Events.STATUS_CONFIRMED)
+            }
+            val existing = resolver.query(
+                CalendarContract.Events.CONTENT_URI,
+                arrayOf(CalendarContract.Events._ID),
+                "${CalendarContract.Events.CALENDAR_ID}=? AND ${CalendarContract.Events.CUSTOM_APP_URI}=?",
+                arrayOf(calendarId.toString(), stableUri),
+                null
+            )?.use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
+
+            if (existing == null) {
+                if (resolver.insert(CalendarContract.Events.CONTENT_URI, values) != null) imported++
+            } else {
+                resolver.update(
+                    CalendarContract.Events.CONTENT_URI,
+                    values,
+                    "${CalendarContract.Events._ID}=?",
+                    arrayOf(existing.toString())
+                )
+                imported++
+            }
+        }
+
+        // Reconcile deletions only after a complete, syntactically valid VCALENDAR
+        // was received by the worker. Events absent from the latest feed are stale.
+        val staleIds = mutableListOf<Long>()
+        resolver.query(
+            CalendarContract.Events.CONTENT_URI,
+            arrayOf(CalendarContract.Events._ID, CalendarContract.Events.CUSTOM_APP_URI),
+            "${CalendarContract.Events.CALENDAR_ID}=?",
+            arrayOf(calendarId.toString()),
+            null
+        )?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(CalendarContract.Events._ID)
+            val uriColumn = cursor.getColumnIndexOrThrow(CalendarContract.Events.CUSTOM_APP_URI)
+            while (cursor.moveToNext()) {
+                val storedUri = cursor.getString(uriColumn)
+                if (storedUri != null && storedUri.startsWith("etar-ics://$digest/") &&
+                    storedUri !in seenUris) {
+                    staleIds.add(cursor.getLong(idColumn))
+                }
+            }
+        }
+        for (id in staleIds) {
+            resolver.delete(
+                CalendarContract.Events.CONTENT_URI,
+                "${CalendarContract.Events._ID}=? AND ${CalendarContract.Events.CALENDAR_ID}=?",
+                arrayOf(id.toString(), calendarId.toString())
+            )
+        }
+        return imported
+    }
+
+    /** Removes the local calendar owned by a feed when the subscription is deleted. */
+    fun removeFeed(context: Context, feedUrl: String) {
+        val accountName = "etar_ics_${sha256(feedUrl).take(24)}"
+        val resolver = context.contentResolver
+        val calendarIds = mutableListOf<Long>()
+        resolver.query(
+            CalendarContract.Calendars.CONTENT_URI,
+            arrayOf(CalendarContract.Calendars._ID),
+            "${CalendarContract.Calendars.ACCOUNT_NAME}=? AND ${CalendarContract.Calendars.ACCOUNT_TYPE}=?",
+            arrayOf(accountName, CalendarContract.ACCOUNT_TYPE_LOCAL),
+            null
+        )?.use { cursor ->
+            while (cursor.moveToNext()) calendarIds.add(cursor.getLong(0))
+        }
+        for (id in calendarIds) {
+            val uri = CalendarContract.Calendars.CONTENT_URI.buildUpon()
+                .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+                .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, accountName)
+                .appendQueryParameter(
+                    CalendarContract.Calendars.ACCOUNT_TYPE,
+                    CalendarContract.ACCOUNT_TYPE_LOCAL
+                )
+                .build()
+            resolver.delete(uri, "${CalendarContract.Calendars._ID}=?", arrayOf(id.toString()))
+        }
+    }
+
+    private fun findOrCreateCalendar(context: Context, accountName: String, displayName: String): Long? {
+        val resolver = context.contentResolver
+        resolver.query(
+            CalendarContract.Calendars.CONTENT_URI,
+            arrayOf(CalendarContract.Calendars._ID),
+            "${CalendarContract.Calendars.ACCOUNT_NAME}=? AND ${CalendarContract.Calendars.ACCOUNT_TYPE}=?",
+            arrayOf(accountName, CalendarContract.ACCOUNT_TYPE_LOCAL),
+            null
+        )?.use { if (it.moveToFirst()) return it.getLong(0) }
+
+        val values = ContentValues().apply {
+            put(CalendarContract.Calendars.ACCOUNT_NAME, accountName)
+            put(CalendarContract.Calendars.ACCOUNT_TYPE, CalendarContract.ACCOUNT_TYPE_LOCAL)
+            put(CalendarContract.Calendars.OWNER_ACCOUNT, accountName)
+            put(CalendarContract.Calendars.NAME, accountName)
+            put(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, displayName)
+            put(CalendarContract.Calendars.CALENDAR_COLOR, 0xFF4285F4.toInt())
+            put(CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL, CalendarContract.Calendars.CAL_ACCESS_ROOT)
+            put(CalendarContract.Calendars.VISIBLE, 1)
+            put(CalendarContract.Calendars.SYNC_EVENTS, 1)
+            put(CalendarContract.Calendars.CAN_MODIFY_TIME_ZONE, 1)
+            put(CalendarContract.Calendars.ALLOWED_REMINDERS, CalendarContract.Reminders.METHOD_ALERT.toString())
+            put(CalendarContract.Calendars.ALLOWED_ATTENDEE_TYPES, CalendarContract.Attendees.TYPE_NONE.toString())
+        }
+        val syncAdapterUri = CalendarContract.Calendars.CONTENT_URI.buildUpon()
+            .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+            .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, accountName)
+            .appendQueryParameter(
+                CalendarContract.Calendars.ACCOUNT_TYPE,
+                CalendarContract.ACCOUNT_TYPE_LOCAL
+            )
+            .build()
+        return resolver.insert(syncAdapterUri, values)?.lastPathSegment?.toLongOrNull()
+    }
+
+    private fun parseDate(value: String, params: String): Long? {
+        val patterns = if (value.endsWith("Z")) listOf("yyyyMMdd'T'HHmmss'Z'", "yyyyMMdd'T'HHmm'Z'")
+            else if (value.length == 8) listOf("yyyyMMdd")
+            else listOf("yyyyMMdd'T'HHmmss", "yyyyMMdd'T'HHmm")
+        for (pattern in patterns) try {
+            val format = SimpleDateFormat(pattern, Locale.ROOT).apply {
+                isLenient = false
+                timeZone = when {
+                    value.endsWith("Z") -> TimeZone.getTimeZone("UTC")
+                    params.contains("TZID=", true) -> {
+                        val tzid = params.split(';')
+                            .firstOrNull { it.startsWith("TZID=", true) }
+                            ?.substringAfter('=')
+                            ?.trim('"')
+                        tzid?.let(TimeZone::getTimeZone) ?: TimeZone.getDefault()
+                    }
+                    else -> TimeZone.getDefault()
+                }
+            }
+            return format.parse(value)?.time
+        } catch (_: Exception) { }
+        return null
+    }
+
+    private fun timezoneId(value: String, params: String): String {
+        if (value.endsWith("Z")) return "UTC"
+        if (params.contains("TZID=", true)) {
+            val tzid = params.split(';')
+                .firstOrNull { it.startsWith("TZID=", true) }
+                ?.substringAfter('=')
+                ?.trim('"')
+            if (!tzid.isNullOrBlank() && TimeZone.getTimeZone(tzid).id != "GMT") {
+                return TimeZone.getTimeZone(tzid).id
+            }
+        }
+        return TimeZone.getDefault().id
+    }
+
+    private fun unfold(text: String): List<String> {
+        val result = mutableListOf<String>()
+        for (line in text.replace("\r\n", "\n").replace('\r', '\n').split('\n')) {
+            if ((line.startsWith(" ") || line.startsWith("\t")) && result.isNotEmpty()) {
+                result[result.lastIndex] = result.last() + line.drop(1)
+            } else result.add(line)
+        }
+        return result
+    }
+
+    private fun unescape(value: String?): String =
+        value.orEmpty().replace("\\n", "\n").replace("\\N", "\n")
+            .replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
+
+    private fun hostName(url: String): String = try { URI(url).host ?: "remoto" } catch (_: Exception) { "remoto" }
+
+    private fun sha256(value: String): String =
+        MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+}
